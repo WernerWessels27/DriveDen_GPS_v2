@@ -1,4 +1,4 @@
-// server.js — DriveDen GPS v2 (Leaflet) + GI proxy
+// server.js — DriveDen GPS v2 (Leaflet) + GI proxy (multi-endpoint search)
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -74,7 +74,6 @@ app.get("/gi/_auth", async (_req, res) => {
   }
 });
 
-// search courses (course groups) with GPS + ZA fallback
 // search courses (multi-endpoint with GPS + ZA fallback)
 app.get("/gi/courses", async (req, res) => {
   try {
@@ -111,30 +110,29 @@ app.get("/gi/courses", async (req, res) => {
       return list || [];
     }
 
-    // Try course GROUPS first
     const baseBody = {
       rows: 50,
       offset: 0,
       keywords: q,
-      countryCode: "",  // wide open first
+      countryCode: "",
       regionCode: "",
       gpsCoordinate: gps
     };
 
+    // 1) Try course GROUPS first
     let list = await postJson("/courses/searchCourseGroups", baseBody);
 
-    // If empty, try plain COURSES (some tenants index only this)
+    // 2) If empty, try plain COURSES
     if (!list.length) list = await postJson("/courses/searchCourses", baseBody);
 
-    // If still empty, force ZA and retry both (helps when keywords are broad)
+    // 3) If still empty, force ZA and retry both
     if (!list.length) {
       const zaBody = { ...baseBody, countryCode: "ZA" };
       list = await postJson("/courses/searchCourseGroups", zaBody);
       if (!list.length) list = await postJson("/courses/searchCourses", zaBody);
     }
 
-    // If still empty, try a known US city to sanity-check coverage (Scottsdale)
-    // (This helps you see if the API has content but not in SA yet.)
+    // 4) Optional sanity check (US)
     if (!list.length && !q.toLowerCase().includes("scottsdale")) {
       const usBody = { ...baseBody, keywords: "Scottsdale", countryCode: "US" };
       const sanity = await postJson("/courses/searchCourses", usBody);
@@ -145,21 +143,6 @@ app.get("/gi/courses", async (req, res) => {
 
     setCache(key, list, SEARCH_TTL_MS);
     return res.json(list);
-  } catch (e) {
-    console.error("[SEARCH] error", e);
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-
-    // 2) fallback: force ZA + same gps point if empty
-    if (!list.length) {
-      console.log("[SEARCH] empty → retry with country ZA");
-      list = await doSearch({ ...body, countryCode: "ZA" });
-    }
-
-    setCache(key, list, SEARCH_TTL_MS);
-    res.json(list);
   } catch (e) {
     console.error("[SEARCH] error", e);
     res.status(500).json({ error: String(e) });
