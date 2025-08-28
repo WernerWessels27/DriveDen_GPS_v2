@@ -75,6 +75,7 @@ app.get("/gi/_auth", async (_req, res) => {
 });
 
 // search courses (course groups) with GPS + ZA fallback
+// search courses (multi-endpoint with GPS + ZA fallback)
 app.get("/gi/courses", async (req, res) => {
   try {
     const q   = String(req.query.q || "").trim();
@@ -87,8 +88,11 @@ app.get("/gi/courses", async (req, res) => {
 
     const token = await getAccessToken();
 
-    async function doSearch(body) {
-      const r = await fetch(`${GI_BASE}/courses/searchCourseGroups`, {
+    const fallbackGPS = { latitude: -25.746, longitude: 28.188 }; // Pretoria CBD
+    const gps = (lat && lng) ? { latitude: lat, longitude: lng } : fallbackGPS;
+
+    async function postJson(path, body) {
+      const r = await fetch(`${GI_BASE}${path}`, {
         method: "POST",
         headers: {
           "accept": "application/json",
@@ -100,26 +104,53 @@ app.get("/gi/courses", async (req, res) => {
       const text = await r.text();
       let json; try { json = JSON.parse(text); } catch { json = null; }
       if (!r.ok) {
-        console.error("[SEARCH] status", r.status, text);
+        console.warn(`[SEARCH] ${path} -> ${r.status}`, text.slice(0, 200));
         return [];
       }
       const list = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : []);
       return list || [];
     }
 
-    const fallbackGPS = { latitude: -25.746, longitude: 28.188 }; // Pretoria CBD
-    const gps = (lat && lng) ? { latitude: lat, longitude: lng } : fallbackGPS;
-
-    // 1) try keyword + gps point
-    let body = {
+    // Try course GROUPS first
+    const baseBody = {
       rows: 50,
       offset: 0,
       keywords: q,
-      countryCode: "",
+      countryCode: "",  // wide open first
       regionCode: "",
       gpsCoordinate: gps
     };
-    let list = await doSearch(body);
+
+    let list = await postJson("/courses/searchCourseGroups", baseBody);
+
+    // If empty, try plain COURSES (some tenants index only this)
+    if (!list.length) list = await postJson("/courses/searchCourses", baseBody);
+
+    // If still empty, force ZA and retry both (helps when keywords are broad)
+    if (!list.length) {
+      const zaBody = { ...baseBody, countryCode: "ZA" };
+      list = await postJson("/courses/searchCourseGroups", zaBody);
+      if (!list.length) list = await postJson("/courses/searchCourses", zaBody);
+    }
+
+    // If still empty, try a known US city to sanity-check coverage (Scottsdale)
+    // (This helps you see if the API has content but not in SA yet.)
+    if (!list.length && !q.toLowerCase().includes("scottsdale")) {
+      const usBody = { ...baseBody, keywords: "Scottsdale", countryCode: "US" };
+      const sanity = await postJson("/courses/searchCourses", usBody);
+      if (sanity.length) {
+        console.warn("[SEARCH] No results for query/region; API returned data for US (coverage likely limited).");
+      }
+    }
+
+    setCache(key, list, SEARCH_TTL_MS);
+    return res.json(list);
+  } catch (e) {
+    console.error("[SEARCH] error", e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 
     // 2) fallback: force ZA + same gps point if empty
     if (!list.length) {
