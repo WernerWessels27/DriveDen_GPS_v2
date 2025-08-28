@@ -184,6 +184,65 @@ app.get("/gi/courses/:publicId/gps", async (req, res) => {
 // front-end
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "web", "index.html")));
 
+//addon code
+// debug: probe multiple endpoints and bodies to see what returns data
+app.get("/gi/_probes", async (req, res) => {
+  try {
+    const token = await getAccessToken();
+
+    const bodies = [
+      { label: "KW Pretoria + GPS", body: {
+        rows: 50, offset: 0, keywords: "Pretoria",
+        countryCode: "", regionCode: "",
+        gpsCoordinate: { latitude: -25.746, longitude: 28.188 }
+      }},
+      { label: "KW Scottsdale + US", body: {
+        rows: 50, offset: 0, keywords: "Scottsdale",
+        countryCode: "US", regionCode: "",
+        gpsCoordinate: { latitude: 33.4942, longitude: -111.9261 }
+      }},
+      { label: "Empty keywords + ZA", body: {
+        rows: 50, offset: 0, keywords: "",
+        countryCode: "ZA", regionCode: "",
+        gpsCoordinate: { latitude: -25.746, longitude: 28.188 }
+      }},
+    ];
+
+    const paths = [
+      "/courses/searchCourseGroups",
+      "/courses/searchCourses"
+    ];
+
+    async function tryPost(path, body) {
+      const r = await fetch(`${GI_BASE}${path}`, {
+        method: "POST",
+        headers: {
+          "accept": "application/json",
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify(body)
+      });
+      const text = await r.text();
+      let json; try { json = JSON.parse(text); } catch { json = null; }
+      const count = Array.isArray(json?.data) ? json.data.length
+                   : (Array.isArray(json) ? json.length : 0);
+      return { path, status: r.status, count, peek: text.slice(0, 220) };
+    }
+
+    const out = [];
+    for (const p of paths) {
+      for (const b of bodies) {
+        out.push({ label: b.label, ...(await tryPost(p, b.body)) });
+      }
+    }
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+
 // listen on 0.0.0.0 for Railway
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`DriveDen GPS running on port ${PORT}`);
