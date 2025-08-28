@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>DriveDen GPS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; position: relative; }
+    .brand {
+      position: fixed; top: 10px; left: 10px; z-index: 10000;
+      display: flex; align-items: center; gap: 10px;
+      background: rgba(255,255,255,.9); padding: 6px 10px; border-radius: 10px;
+      box-shadow: 0 6px 16px rgba(0,0,0,.15);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .panel {
+      position: fixed; top: 80px; left: 10px; z-index: 10000;
+      background: rgba(255,255,255,.95); padding: 10px 12px; border-radius: 10px;
+      box-shadow: 0 6px 16px rgba(0,0,0,.15); width: 310px; max-width: calc(100% - 20px);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .row { margin: 6px 0; font-size: 14px; }
+    .ok { color: #0a7 } .warn { color: #a60 } .err { color: #b00 }
+    select, input, button { width: 100%; padding: 8px; font-size: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .muted { font-size: 12px; opacity: .7; }
+  </style>
+</head>
+<body>
+<div class="brand">
+  <img src="driveden-logo.svg" alt="DriveDen GPS" style="height:34px;">
+  <strong>DriveDen GPS</strong>
+</div>
+
+<div id="map"></div>
+
+<div class="panel">
+  <div class="row"><strong>Course search</strong></div>
+  <div class="grid">
+    <input id="q" placeholder="Type course name or city…" />
+    <button id="btnSearch">Search</button>
+  </div>
+  <div class="row"><select id="courses"></select></div>
+  <div class="grid">
+    <select id="holes"></select>
+    <button id="btnLoad">Load hole</button>
+  </div>
+
+  <div class="row"><strong>Distances (m)</strong></div>
+  <div class="row">You → Front: <span id="dFront">–</span></div>
+  <div class="row">You → Middle: <span id="dMid">–</span></div>
+  <div class="row">You → Back: <span id="dBack">–</span></div>
+  <div class="row muted" id="status">Getting GPS…</div>
+  <div class="row muted">Tip: Allow location when prompted; accuracy improves outdoors.</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
+<script>
+  const map = L.map('map');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+  let you = L.circleMarker([0,0], { radius: 6 }).addTo(map);
+  let movedOnce = false;
+  const markers = {};
+  let holes = [];
+  let lastPos = null;
+
+  function meters(a, b){
+    const toRad = d => d * Math.PI / 180, R = 6371000;
+    const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+    const s1 = Math.sin(dLat/2), s2 = Math.sin(dLng/2);
+    const q = s1*s1 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*s2*s2;
+    return 2*R*Math.asin(Math.sqrt(q));
+  }
+
+  function setMarker(name, pos, label){
+    if (!pos) return;
+    if (markers[name]) { markers[name].setLatLng([pos.lat, pos.lng]); return; }
+    markers[name] = L.circleMarker([pos.lat, pos.lng], { radius: 6 }).addTo(map);
+    if (label) markers[name].bindTooltip(label);
+  }
+
+  function updateDistances(p){
+    const sel = document.getElementById('holes');
+    const n = Number(sel.value);
+    const h = holes.find(x => x.number === n);
+    if (!h) return;
+    const f = h.green.front || h.green.center;
+    const m = h.green.mid   || h.green.center;
+    const b = h.green.back  || h.green.center;
+    document.getElementById('dFront').textContent = Math.round(meters(p, f));
+    document.getElementById('dMid').textContent   = Math.round(meters(p, m));
+    document.getElementById('dBack').textContent  = Math.round(meters(p, b));
+  }
+
+  function startGPS(){
+    const status = document.getElementById('status');
+    if (!('geolocation' in navigator)) { status.textContent = 'Geolocation not supported'; return; }
+    navigator.geolocation.watchPosition(pos => {
+      const p = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      lastPos = p;
+      you.setLatLng([p.lat, p.lng]);
+      updateDistances(p);
+      const acc = Math.round(pos.coords.accuracy || 0);
+      status.textContent = `Accuracy: ${acc} m`;
+      if (!movedOnce) { map.setView([p.lat, p.lng], 17); movedOnce = true; }
+    }, err => {
+      status.textContent = err.message;
+    }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
+  }
+
+  async function searchCourses(){
+    const q = document.getElementById('q').value.trim() || 'Pretoria';
+    const params = new URLSearchParams({ q });
+    if (lastPos) { params.set('lat', lastPos.lat); params.set('lng', lastPos.lng); }
+    const r = await fetch('/gi/courses?' + params.toString());
+    const data = await r.json();
+    const list = Array.isArray(data) ? data : (data.data || []);
+    const sel = document.getElementById('courses');
+    sel.innerHTML = '';
+    if (!list.length) {
+      document.getElementById('status').textContent = 'No courses found for this area/keyword.';
+      return;
+    }
+    list.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.publicId || c.id || c.courseGroupId;
+      const city = c?.facility?.address?.city || '';
+      const region = c?.facility?.address?.region || '';
+      const country = c?.facility?.address?.countryCode || '';
+      opt.textContent = `${c.name || 'Course'} — ${[city, region, country].filter(Boolean).join(', ')}`;
+      sel.appendChild(opt);
+    });
+    document.getElementById('status').textContent = `Found ${list.length} course(s).`;
+    const firstId = list[0].publicId || list[0].id || list[0].courseGroupId;
+    if (firstId) await loadHoles(firstId);
+  }
+
+  function adaptGItoHoles(gi){
+    const baseHoles = gi.layouts?.[0]?.holes?.length ? gi.layouts[0].holes : (gi.holes || []);
+    const items = gi.gpsItems || [];
+    const byHole = {};
+    for (const it of items) {
+      if (!byHole[it.holeId]) byHole[it.holeId] = {};
+      byHole[it.holeId][it.gpsType] = it.gpsCoordinate ? { lat: it.gpsCoordinate.latitude, lng: it.gpsCoordinate.longitude } : null;
+    }
+    const out = baseHoles.map(h => {
+      const tee = h.teeGPSCoordinate ? { lat: h.teeGPSCoordinate.latitude, lng: h.teeGPSCoordinate.longitude } : null;
+      const center = h.greenGPSCoordinate ? { lat: h.greenGPSCoordinate.latitude, lng: h.greenGPSCoordinate.longitude } : null;
+      const gh = byHole[h.holeId] || {};
+      const front = gh["FrontMarker"] || null;
+      const mid   = gh["MiddleMarker"] || null;
+      const back  = gh["BackMarker"] || null;
+      return { number: h.holeNumber, par: h.par, yardage: h.yardage, holeId: h.holeId, tee, green: { center, front, mid, back } };
+    });
+    return out;
+  }
+
+  async function loadHoles(publicId){
+    const r = await fetch(`/gi/courses/${encodeURIComponent(publicId)}/gps`);
+    const gi = await r.json();
+    holes = adaptGItoHoles(gi);
+    const sel = document.getElementById('holes');
+    sel.innerHTML = '';
+    holes.forEach(h => {
+      const opt = document.createElement('option');
+      opt.value = h.number;
+      opt.textContent = `Hole ${h.number}`;
+      sel.appendChild(opt);
+    });
+    if (holes.length) renderHole(holes[0], true);
+  }
+
+  function renderHole(h, center){
+    setMarker('tee', h.tee, 'Tee');
+    setMarker('front', (h.green.front || h.green.center), 'Front');
+    setMarker('mid', (h.green.mid || h.green.center), 'Middle');
+    setMarker('back', (h.green.back || h.green.center), 'Back');
+    if (center) {
+      const pts = [h.tee, h.green.front, h.green.mid, h.green.back, h.green.center].filter(Boolean);
+      if (pts.length) {
+        const bounds = L.latLngBounds(pts.map(p => [p.lat, p.lng]));
+        map.fitBounds(bounds);
+      }
+    }
+  }
+
+  document.getElementById('btnSearch').onclick = searchCourses;
+  document.getElementById('btnLoad').onclick = () => {
+    const n = Number(document.getElementById('holes').value);
+    const h = holes.find(x => x.number === n);
+    if (h) renderHole(h, true);
+  };
+
+  map.setView([-25.7542, 28.2322], 15);
+  startGPS();
+  searchCourses();
+</script>
+</body>
+</html>
