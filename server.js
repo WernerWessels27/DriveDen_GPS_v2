@@ -95,7 +95,7 @@ app.get("/gi/courses", async (req, res) => {
         method: "POST",
         headers: {
           "accept": "application/json",
-          "Content-Type": "application/json-patch+json",
+          "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         },
         body: JSON.stringify(body)
